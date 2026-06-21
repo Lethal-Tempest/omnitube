@@ -1,3 +1,5 @@
+const BACKEND_URL = "https://omnitube.onrender.com"; // Set to "http://127.0.0.1:5000" for local development
+
 let currentVideoId = null;
 
 function getYouTubeId(url) {
@@ -44,7 +46,7 @@ document.getElementById("askBtn").addEventListener("click", async () => {
   resultDiv.innerText = "Analyzing transcript & generating answer...";
   
   try {
-    const response = await fetch("http://127.0.0.1:5000/ask", {
+    const response = await fetch(`${BACKEND_URL}/ask`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json"

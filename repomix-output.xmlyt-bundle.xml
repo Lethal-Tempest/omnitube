@@ -1,0 +1,1847 @@
+This file is a merged representation of the entire codebase, combined into a single document by Repomix.
+
+<file_summary>
+This section contains a summary of this file.
+
+<purpose>
+This file contains a packed representation of the entire repository's contents.
+It is designed to be easily consumable by AI systems for analysis, code review,
+or other automated processes.
+</purpose>
+
+<file_format>
+The content is organized as follows:
+1. This summary section
+2. Repository information
+3. Directory structure
+4. Repository files (if enabled)
+5. Multiple file entries, each consisting of:
+  - File path as an attribute
+  - Full contents of the file
+</file_format>
+
+<usage_guidelines>
+- This file should be treated as read-only. Any changes should be made to the
+  original repository files, not this packed version.
+- When processing this file, use the file path to distinguish
+  between different files in the repository.
+- Be aware that this file may contain sensitive information. Handle it with
+  the same level of security as you would the original repository.
+</usage_guidelines>
+
+<notes>
+- Some files may have been excluded based on .gitignore rules and Repomix's configuration
+- Binary files are not included in this packed representation. Please refer to the Repository Structure section for a complete list of file paths, including binary files
+- Files matching patterns in .gitignore are excluded
+- Files matching default ignore patterns are excluded
+- Files are sorted by Git change count (files with more changes are at the bottom)
+</notes>
+
+</file_summary>
+
+<directory_structure>
+.gitignore
+.repomix/bundles.json
+backend/app.py
+backend/nb.py
+backend/requirements.txt
+dmh-developer-trial-task.pdf
+frontend/app.js
+frontend/index.css
+frontend/index.html
+frontend/manifest.json
+frontend/popup.html
+frontend/popup.js
+SUBMISSION.md
+</directory_structure>
+
+<files>
+This section contains the contents of the repository's files.
+
+<file path=".repomix/bundles.json">
+{
+  "bundles": {
+    "yt-bundle-455": {
+      "name": "yt-bundle",
+      "created": "2026-06-21T08:01:19.569Z",
+      "lastUsed": "2026-06-21T08:01:19.569Z",
+      "tags": [],
+      "files": [
+        ""
+      ]
+    }
+  }
+}
+</file>
+
+<file path=".gitignore">
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# C extensions
+*.so
+
+# Distribution / packaging
+bin/
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Installer logs
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Unit test / coverage reports
+htmlcov/
+.tox/
+.nosenv/
+.pytest_cache/
+.mypy_cache/
+venv/
+.venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+
+# Environment secrets
+.env
+.env.*
+.venv
+
+# Chroma DB / VectorStore Temp Files
+chroma/
+.chroma/
+*.db
+
+# macOS System Files
+.DS_Store
+
+# Windows System Files
+Thumbs.db
+desktop.ini
+
+# IDEs and editors
+.idea/
+.vscode/
+*.swp
+*.swo
+*.sublime-project
+*.sublime-workspace
+</file>
+
+<file path="backend/app.py">
+# pyrefly: ignore [missing-import]
+import os
+import threading
+from collections import OrderedDict
+# pyrefly: ignore [missing-import]
+from flask import Flask, request, jsonify
+from flask_cors import CORS
+# pyrefly: ignore [missing-import]
+from youtube_transcript_api import YouTubeTranscriptApi
+# pyrefly: ignore [missing-import]
+from langchain_text_splitters import RecursiveCharacterTextSplitter
+# pyrefly: ignore [missing-import]
+from langchain_google_genai import GoogleGenerativeAIEmbeddings, ChatGoogleGenerativeAI
+# pyrefly: ignore [missing-import]
+from langchain_chroma import Chroma
+# pyrefly: ignore [missing-import]
+from langchain_core.prompts import PromptTemplate
+# pyrefly: ignore [missing-import]
+from langchain_core.runnables import RunnablePassthrough
+# pyrefly: ignore [missing-import]
+from langchain_core.output_parsers import StrOutputParser
+# pyrefly: ignore [missing-import]
+from dotenv import load_dotenv
+
+load_dotenv()
+
+app = Flask(__name__)
+# Enable CORS for all routes and domains to ease Vercel deployment connection
+CORS(app, resources={r"/*": {"origins": "*"}})
+
+# Simple LRU cache for vectorstore retrievers to boost subsequent questions
+MAX_CACHE_SIZE = 20
+retriever_cache = OrderedDict()
+cache_lock = threading.Lock()
+
+def get_or_create_retriever(video_id):
+    with cache_lock:
+        if video_id in retriever_cache:
+            # Move to end (most recently used)
+            retriever_cache.move_to_end(video_id)
+            return retriever_cache[video_id]
+
+    # If not cached, fetch and build it
+    # 1. Fetch transcript
+    transcript = YouTubeTranscriptApi().fetch(video_id, languages=['en', 'hi'])
+    text = " ".join(item.text for item in transcript)
+
+    if not text.strip():
+        raise ValueError("The transcript is empty.")
+
+    # 2. Split text into chunks
+    splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
+    chunks = splitter.split_text(text)
+
+    # 3. Vector store and retriever
+    embeddings = GoogleGenerativeAIEmbeddings(model="models/gemini-embedding-001")
+    vectorstore = Chroma.from_texts(chunks, embeddings)
+    retriever = vectorstore.as_retriever()
+
+    with cache_lock:
+        retriever_cache[video_id] = retriever
+        if len(retriever_cache) > MAX_CACHE_SIZE:
+            retriever_cache.popitem(last=False) # remove least recently used
+
+    return retriever
+
+@app.route('/health', methods=['GET'])
+def health_check():
+    return jsonify({"status": "healthy"}), 200
+
+@app.route('/load', methods=['POST'])
+def load_video():
+    data = request.json or {}
+    video_id = data.get('video_id')
+
+    if not video_id:
+        return jsonify({"error": "Missing video_id"}), 400
+
+    try:
+        # Pre-fetch and cache retriever
+        get_or_create_retriever(video_id)
+        return jsonify({"message": "Video transcript loaded and indexed successfully."}), 200
+    except Exception as e:
+        return jsonify({"error": f"Failed to load transcript: {str(e)}"}), 500
+
+@app.route('/ask', methods=['POST'])
+def ask_video():
+    data = request.json or {}
+    video_id = data.get('video_id')
+    question = data.get('question')
+
+    if not video_id or not question:
+        return jsonify({"error": "Missing video_id or question"}), 400
+
+    try:
+        # Get retriever from cache or construct it
+        retriever = get_or_create_retriever(video_id)
+
+        # 4. Prompt & LLM Setup
+        prompt = PromptTemplate.from_template(
+            "You are a helpful assistant answering questions about the following YouTube video transcript.\n\n"
+            "Context from the transcript:\n{context}\n\n"
+            "Question: {question}\n\n"
+            "Provide a clear, detailed, and accurate answer based on the context. If the context does not contain the answer, use your general knowledge but state clearly that it is not explicitly mentioned in the video."
+        )
+        llm = ChatGoogleGenerativeAI(model="models/gemini-2.5-flash")
+
+        # 5. RAG Chain
+        chain = (
+            {
+                "context": retriever | (lambda docs: "\n\n".join(d.page_content for d in docs)),
+                "question": RunnablePassthrough()
+            }
+            | prompt
+            | llm
+            | StrOutputParser()
+        )
+
+        # Run the chain
+        answer = chain.invoke(question)
+        return jsonify({"answer": answer})
+
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+if __name__ == '__main__':
+    # Bind to PORT environment variable for Render compatibility
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host='0.0.0.0', port=port, debug=False)
+</file>
+
+<file path="backend/nb.py">
+import argparse
+import re
+# pyrefly: ignore [missing-import]
+from youtube_transcript_api import YouTubeTranscriptApi
+
+def count_word_in_video(video_id, target_word):
+    try:
+        print(f"Fetching transcript for video ID: {video_id}...")
+        
+        # Kept exactly as requested: Your working API call implementation
+        transcript = YouTubeTranscriptApi().fetch(video_id, languages=['en', 'hi'])
+        text = " ".join(item.text for item in transcript).lower()
+
+        # Count exact occurrences using word boundaries (\b)
+        count = len(re.findall(rf'\b{re.escape(target_word.lower())}\b', text))
+        
+        print("\n" + "="*40)
+        print(f"Success! Analysis for video '{video_id}':")
+        print(f"The word '{target_word}' appears {count} times.")
+        print("="*40)
+
+    except Exception as e:
+        print(f"\nError: {e}")
+
+if __name__ == '__main__':
+    # Set up CLI argument parsing
+    parser = argparse.ArgumentParser(description="Count occurrences of a specific word in a YouTube video transcript.")
+    
+    # Both arguments are now clean positional requirements
+    parser.add_argument("video_id", help="The 11-character YouTube video ID (e.g., dQw4w9WgXcQ)")
+    parser.add_argument("word", help="The specific word you want to count (e.g., 'right', 'like')")
+    
+    args = parser.parse_args()
+    
+    # Passes both arguments directly from the CLI input
+    count_word_in_video(args.video_id, args.word)
+</file>
+
+<file path="backend/requirements.txt">
+flask>=3.1.3
+flask-cors>=6.0.5
+youtube-transcript-api>=1.2.4
+langchain-text-splitters>=1.1.2
+langchain-google-genai>=4.2.5
+langchain-chroma>=1.1.0
+langchain-core>=1.4.7
+python-dotenv>=1.2.2
+gunicorn>=20.1.0
+</file>
+
+<file path="frontend/app.js">
+// Configuration - Set your Render backend URL here for production deployment
+const BACKEND_URL = window.location.hostname === "localhost" || window.location.hostname === "127.0.0.1"
+  ? "http://127.0.0.1:5000"
+  : "https://dmh-developer-trial-task.onrender.com"; // Replace with your Render URL after deploying the backend
+
+let currentVideoId = null;
+let currentVideoTitle = "YouTube Video";
+
+// DOM Elements
+const setupView = document.getElementById("setupView");
+const loadingView = document.getElementById("loadingView");
+const workspaceView = document.getElementById("workspaceView");
+const mainFooter = document.getElementById("mainFooter");
+
+const urlForm = document.getElementById("urlForm");
+const youtubeUrlInput = document.getElementById("youtubeUrl");
+const validationError = document.getElementById("validationError");
+const loadBtn = document.getElementById("loadBtn");
+
+const loadingTitle = document.getElementById("loadingTitle");
+const loadingStatus = document.getElementById("loadingStatus");
+const progressFill = document.getElementById("progressFill");
+
+const videoThumbnail = document.getElementById("videoThumbnail");
+const videoTitle = document.getElementById("videoTitle");
+const videoAuthor = document.getElementById("videoAuthor");
+const changeVideoBtn = document.getElementById("changeVideoBtn");
+
+const chatHistory = document.getElementById("chatHistory");
+const chatForm = document.getElementById("chatForm");
+const questionInput = document.getElementById("questionInput");
+
+// Textarea auto-resize listener
+questionInput.addEventListener("input", function() {
+  this.style.height = "auto";
+  this.style.height = (this.scrollHeight - 10) + "px";
+});
+
+// Helper: Extract YouTube video ID
+function getYouTubeId(url) {
+  if (!url) return null;
+  url = url.trim();
+  const regExp = /^.*(youtu.be\/|v\/|u\/\w\/|embed\/|watch\?v=|\&v=)([^#\&\?]*).*/;
+  const match = url.match(regExp);
+  return (match && match[2].length === 11) ? match[2] : null;
+}
+
+// Helper: Fetch YouTube oEmbed metadata for title and publisher details
+async function fetchVideoDetails(videoId) {
+  try {
+    const oEmbedUrl = `https://noembed.com/embed?url=https://www.youtube.com/watch?v=${videoId}`;
+    const response = await fetch(oEmbedUrl);
+    if (response.ok) {
+      const data = await response.json();
+      return {
+        title: data.title || "YouTube Video",
+        author: data.author_name || "YouTube Creator"
+      };
+    }
+  } catch (e) {
+    console.error("Could not fetch video details from oEmbed:", e);
+  }
+  return { title: "YouTube Video", author: "YouTube Creator" };
+}
+
+// Helper: Format simple markdown in API response
+function formatMarkdown(text) {
+  if (!text) return "";
+  
+  // Escape HTML to prevent injection
+  let escaped = text
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
+    
+  // Bold formatting: **text** -> <strong>text</strong>
+  escaped = escaped.replace(/\*\*(.*?)\*\*/g, "<strong>$1</strong>");
+  
+  // Code block: `code` -> <code>code</code>
+  escaped = escaped.replace(/`(.*?)`/g, "<code>$1</code>");
+  
+  // Split lines for bullets and paragraphs
+  const lines = escaped.split("\n");
+  let inList = false;
+  let html = "";
+  
+  for (let line of lines) {
+    const trimmed = line.trim();
+    if (trimmed.startsWith("- ") || trimmed.startsWith("* ")) {
+      if (!inList) {
+        html += "<ul>";
+        inList = true;
+      }
+      html += `<li>${trimmed.substring(2)}</li>`;
+    } else {
+      if (inList) {
+        html += "</ul>";
+        inList = false;
+      }
+      if (trimmed === "") {
+        html += "<br>";
+      } else {
+        html += `<p>${line}</p>`;
+      }
+    }
+  }
+  
+  if (inList) {
+    html += "</ul>";
+  }
+  
+  return html;
+}
+
+// Action: Show views
+function showView(viewId) {
+  setupView.classList.add("hidden");
+  loadingView.classList.add("hidden");
+  workspaceView.classList.add("hidden");
+  
+  if (viewId === "setup") {
+    setupView.classList.remove("hidden");
+    mainFooter.classList.remove("hidden");
+  } else if (viewId === "loading") {
+    loadingView.classList.remove("hidden");
+    mainFooter.classList.add("hidden");
+  } else if (viewId === "workspace") {
+    workspaceView.classList.remove("hidden");
+    mainFooter.classList.add("hidden");
+  }
+}
+
+// Action: Add Chat Message Bubble
+function appendMessage(sender, text, isMarkdown = false) {
+  const messageDiv = document.createElement("div");
+  messageDiv.className = `message ${sender}`;
+  
+  const metaDiv = document.createElement("div");
+  metaDiv.className = "message-meta";
+  metaDiv.innerText = sender === "user" ? "You" : "Assistant AI";
+  
+  const bubbleDiv = document.createElement("div");
+  bubbleDiv.className = "message-bubble";
+  
+  if (isMarkdown) {
+    bubbleDiv.innerHTML = formatMarkdown(text);
+  } else {
+    bubbleDiv.innerText = text;
+  }
+  
+  messageDiv.appendChild(metaDiv);
+  messageDiv.appendChild(bubbleDiv);
+  chatHistory.appendChild(messageDiv);
+  
+  // Scroll to bottom
+  chatHistory.scrollTop = chatHistory.scrollHeight;
+  return messageDiv;
+}
+
+// Action: Add Loading Indicator Bubble
+function appendTypingIndicator() {
+  const messageDiv = document.createElement("div");
+  messageDiv.className = "message assistant typing-bubble";
+  
+  const metaDiv = document.createElement("div");
+  metaDiv.className = "message-meta";
+  metaDiv.innerText = "Assistant AI";
+  
+  const bubbleDiv = document.createElement("div");
+  bubbleDiv.className = "message-bubble";
+  
+  const indicator = document.createElement("div");
+  indicator.className = "typing-indicator";
+  indicator.innerHTML = '<div class="typing-dot"></div><div class="typing-dot"></div><div class="typing-dot"></div>';
+  
+  bubbleDiv.appendChild(indicator);
+  messageDiv.appendChild(metaDiv);
+  messageDiv.appendChild(bubbleDiv);
+  chatHistory.appendChild(messageDiv);
+  
+  chatHistory.scrollTop = chatHistory.scrollHeight;
+  return messageDiv;
+}
+
+// Event: Submit YouTube URL form
+urlForm.addEventListener("submit", async (e) => {
+  e.preventDefault();
+  validationError.innerText = "";
+  
+  const url = youtubeUrlInput.value;
+  const videoId = getYouTubeId(url);
+  
+  if (!videoId) {
+    validationError.innerText = "Please enter a valid YouTube video URL.";
+    return;
+  }
+  
+  currentVideoId = videoId;
+  
+  // Enter loading state
+  showView("loading");
+  loadingTitle.innerText = "Connecting to YouTube...";
+  loadingStatus.innerText = "Fetching the video transcript and metadata. Please hold on...";
+  
+  // Trigger fetch metadata and backend call simultaneously
+  const metadataPromise = fetchVideoDetails(videoId);
+  
+  try {
+    const backendPromise = fetch(`${BACKEND_URL}/load`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({ video_id: videoId })
+    });
+    
+    // Wait for both requests
+    const [metaRes, backendRes] = await Promise.all([metadataPromise, backendPromise]);
+    
+    if (!backendRes.ok) {
+      const errData = await backendRes.json().catch(() => ({}));
+      throw new Error(errData.error || "Could not retrieve transcript. Check if transcript is disabled or video is private.");
+    }
+    
+    // Successfully loaded transcript
+    currentVideoTitle = metaRes.title;
+    
+    // Set Sidebar Details
+    videoThumbnail.src = `https://img.youtube.com/vi/${videoId}/hqdefault.jpg`;
+    videoTitle.innerText = metaRes.title;
+    videoAuthor.innerText = metaRes.author;
+    
+    // Transition to Workspace View
+    showView("workspace");
+    
+    // Clear chat history & add system message
+    chatHistory.innerHTML = "";
+    appendMessage("assistant", "Video transcript loaded successfully! Ask me anything about this video's contents, and I'll analyze it for you.");
+    
+  } catch (error) {
+    console.error(error);
+    showView("setup");
+    validationError.innerText = error.message || "Failed to establish contact with the AI backend. Check connection.";
+  }
+});
+
+// Event: Submit chat question
+chatForm.addEventListener("submit", async (e) => {
+  e.preventDefault();
+  
+  const question = questionInput.value.trim();
+  if (!question) return;
+  
+  // Reset input field height and clear text
+  questionInput.value = "";
+  questionInput.style.height = "auto";
+  
+  // Append user bubble
+  appendMessage("user", question);
+  
+  // Append temporary loading bubble
+  const typingIndicatorBubble = appendTypingIndicator();
+  
+  try {
+    const response = await fetch(`${BACKEND_URL}/ask`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({
+        video_id: currentVideoId,
+        question: question
+      })
+    });
+    
+    // Remove the typing bubble
+    typingIndicatorBubble.remove();
+    
+    const data = await response.json();
+    if (response.ok) {
+      appendMessage("assistant", data.answer, true);
+    } else {
+      appendMessage("assistant", `Error: ${data.error || "Unable to extract answer."}`);
+    }
+  } catch (error) {
+    console.error(error);
+    if (typingIndicatorBubble) typingIndicatorBubble.remove();
+    appendMessage("assistant", "Network Error: Could not reach the server backend. Please verify if your local or deployed Flask app is running.");
+  }
+});
+
+// Event: Click back / Change Video
+changeVideoBtn.addEventListener("click", () => {
+  currentVideoId = null;
+  youtubeUrlInput.value = "";
+  validationError.innerText = "";
+  showView("setup");
+});
+</file>
+
+<file path="frontend/index.css">
+/* Design Tokens */
+:root {
+  --bg-primary: #08090d;
+  --bg-secondary: #0d0f17;
+  --bg-card: rgba(18, 20, 32, 0.7);
+  --bg-glass: rgba(15, 17, 28, 0.6);
+  --border-light: rgba(255, 255, 255, 0.07);
+  --border-focus: rgba(99, 102, 241, 0.5);
+  
+  --color-primary: #6366f1; /* Indigo */
+  --color-primary-hover: #4f46e5;
+  --color-secondary: #a855f7; /* Purple */
+  --color-accent: #06b6d4; /* Cyan */
+  --color-danger: #ef4444; /* Red */
+  
+  --text-main: #f8fafc;
+  --text-muted: #94a3b8;
+  --text-dark: #64748b;
+  
+  --shadow-sm: 0 1px 2px 0 rgba(0, 0, 0, 0.05);
+  --shadow-md: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06);
+  --shadow-lg: 0 20px 25px -5px rgba(0, 0, 0, 0.15), 0 10px 10px -5px rgba(0, 0, 0, 0.04);
+  --shadow-glow: 0 0 25px rgba(99, 102, 241, 0.2);
+  
+  --font-display: 'Outfit', 'Inter', sans-serif;
+  --font-sans: 'Inter', sans-serif;
+  --transition-fast: 0.15s ease;
+  --transition-normal: 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+/* Global Reset & Base */
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  background-color: var(--bg-primary);
+  color: var(--text-main);
+  font-family: var(--font-sans);
+  min-height: 100vh;
+  position: relative;
+  overflow-x: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+/* Ambient glow blobs */
+.bg-glow {
+  position: absolute;
+  width: 500px;
+  height: 500px;
+  border-radius: 50%;
+  filter: blur(120px);
+  z-index: -1;
+  opacity: 0.15;
+  pointer-events: none;
+}
+
+.blob-1 {
+  background: radial-gradient(circle, var(--color-primary) 0%, transparent 70%);
+  top: -100px;
+  right: -50px;
+  animation: float 20s infinite alternate;
+}
+
+.blob-2 {
+  background: radial-gradient(circle, var(--color-secondary) 0%, transparent 70%);
+  bottom: -100px;
+  left: -100px;
+  animation: float 25s infinite alternate-reverse;
+}
+
+@keyframes float {
+  0% { transform: translate(0, 0) scale(1); }
+  50% { transform: translate(50px, 30px) scale(1.1); }
+  100% { transform: translate(-30px, -50px) scale(0.9); }
+}
+
+/* Container Structure */
+.app-container {
+  display: flex;
+  flex-direction: column;
+  min-height: 100vh;
+  width: 100%;
+  max-width: 1440px;
+  margin: 0 auto;
+  padding: 0 2rem;
+}
+
+/* Header */
+.app-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 1.5rem 0;
+  border-bottom: 1px solid var(--border-light);
+}
+
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.brand-icon {
+  width: 2.25rem;
+  height: 2.25rem;
+  filter: drop-shadow(0 2px 8px rgba(239, 68, 68, 0.4));
+}
+
+.brand-text {
+  font-family: var(--font-display);
+  font-weight: 800;
+  font-size: 1.5rem;
+  letter-spacing: -0.5px;
+}
+
+.accent-text {
+  color: var(--color-primary);
+  background: linear-gradient(135deg, var(--color-primary) 0%, var(--color-secondary) 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+}
+
+.hero-partner-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(255, 255, 255, 0.03);
+  color: var(--text-main);
+  border: 1px solid var(--border-light);
+  border-radius: 99px;
+  padding: 0.6rem 1.2rem;
+  font-family: var(--font-display);
+  font-weight: 600;
+  font-size: 0.9rem;
+  text-decoration: none;
+  cursor: pointer;
+  transition: var(--transition-normal);
+}
+
+.hero-partner-btn:hover {
+  background: linear-gradient(135deg, var(--color-primary) 0%, var(--color-secondary) 100%);
+  border-color: transparent;
+  box-shadow: 0 0 15px rgba(168, 85, 247, 0.3);
+  transform: translateY(-2px);
+}
+
+/* Helper Utilities */
+.hidden {
+  display: none !important;
+}
+
+.w-100 {
+  width: 100%;
+}
+
+/* Landing view styling */
+.main-content {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 3rem 0;
+}
+
+.hero-card {
+  width: 100%;
+  max-width: 800px;
+  text-align: center;
+  background: var(--bg-card);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  border: 1px solid var(--border-light);
+  border-radius: 24px;
+  padding: 4rem 3rem;
+  box-shadow: var(--shadow-lg);
+}
+
+.hero-title {
+  font-family: var(--font-display);
+  font-weight: 800;
+  font-size: 3rem;
+  line-height: 1.15;
+  margin-bottom: 1.25rem;
+  letter-spacing: -1px;
+}
+
+.gradient-text {
+  background: linear-gradient(135deg, #818cf8 0%, #c084fc 50%, #22d3ee 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+}
+
+.hero-subtitle {
+  color: var(--text-muted);
+  font-size: 1.125rem;
+  line-height: 1.6;
+  max-width: 600px;
+  margin: 0 auto 3rem auto;
+}
+
+/* URL Input Form */
+.url-form {
+  margin-bottom: 3.5rem;
+}
+
+.input-wrapper {
+  display: flex;
+  background: rgba(10, 11, 16, 0.5);
+  border: 1px solid var(--border-light);
+  border-radius: 16px;
+  padding: 0.5rem;
+  align-items: center;
+  transition: var(--transition-normal);
+  box-shadow: inset 0 2px 4px rgba(0, 0, 0, 0.2);
+}
+
+.input-wrapper:focus-within {
+  border-color: var(--border-focus);
+  box-shadow: var(--shadow-glow);
+  background: rgba(10, 11, 16, 0.8);
+}
+
+.input-icon {
+  width: 1.5rem;
+  height: 1.5rem;
+  color: var(--text-dark);
+  margin-left: 1rem;
+  margin-right: 0.75rem;
+  flex-shrink: 0;
+}
+
+.input-wrapper input {
+  flex: 1;
+  background: transparent;
+  border: none;
+  color: var(--text-main);
+  font-size: 1.05rem;
+  outline: none;
+  padding: 0.75rem 0.5rem;
+  width: 100%;
+}
+
+.input-wrapper input::placeholder {
+  color: var(--text-dark);
+}
+
+.submit-btn {
+  background: linear-gradient(135deg, var(--color-primary) 0%, var(--color-secondary) 100%);
+  color: #fff;
+  border: none;
+  border-radius: 12px;
+  font-family: var(--font-display);
+  font-weight: 700;
+  font-size: 1rem;
+  padding: 0.85rem 1.75rem;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  transition: var(--transition-normal);
+}
+
+.submit-btn:hover {
+  transform: translateY(-1px);
+  filter: brightness(1.1);
+  box-shadow: 0 8px 16px rgba(99, 102, 241, 0.25);
+}
+
+.submit-btn:active {
+  transform: translateY(1px);
+}
+
+.arrow-icon {
+  width: 1.2rem;
+  height: 1.2rem;
+  transition: var(--transition-fast);
+}
+
+.submit-btn:hover .arrow-icon {
+  transform: translateX(3px);
+}
+
+.error-msg {
+  color: var(--color-danger);
+  font-size: 0.9rem;
+  text-align: left;
+  margin-top: 0.75rem;
+  margin-left: 0.5rem;
+  min-height: 1.25rem;
+}
+
+/* Features Grid */
+.features-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 1.5rem;
+}
+
+.feature-item {
+  background: rgba(255, 255, 255, 0.02);
+  border: 1px solid var(--border-light);
+  border-radius: 16px;
+  padding: 1.5rem;
+  text-align: left;
+  transition: var(--transition-normal);
+}
+
+.feature-item:hover {
+  background: rgba(255, 255, 255, 0.04);
+  transform: translateY(-5px);
+  border-color: rgba(255, 255, 255, 0.12);
+}
+
+.feature-icon-box {
+  font-size: 1.75rem;
+  margin-bottom: 1rem;
+}
+
+.feature-item h3 {
+  font-family: var(--font-display);
+  font-size: 1.15rem;
+  font-weight: 700;
+  margin-bottom: 0.5rem;
+}
+
+.feature-item p {
+  color: var(--text-muted);
+  font-size: 0.9rem;
+  line-height: 1.45;
+}
+
+/* Loading state view */
+.loading-view {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.loading-card {
+  background: var(--bg-card);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  border: 1px solid var(--border-light);
+  border-radius: 24px;
+  padding: 4rem 3rem;
+  max-width: 480px;
+  width: 100%;
+  text-align: center;
+  box-shadow: var(--shadow-lg);
+}
+
+.spinner-container {
+  position: relative;
+  width: 80px;
+  height: 80px;
+  margin: 0 auto 2rem auto;
+}
+
+.spinner {
+  width: 100%;
+  height: 100%;
+  border: 4px solid rgba(99, 102, 241, 0.1);
+  border-left-color: var(--color-primary);
+  border-radius: 50%;
+  animation: spin 1s linear infinite;
+}
+
+.pulse-ring {
+  position: absolute;
+  top: -10px;
+  left: -10px;
+  right: -10px;
+  bottom: -10px;
+  border-radius: 50%;
+  border: 2px solid var(--color-secondary);
+  opacity: 0;
+  animation: pulse 2s cubic-bezier(0.215, 0.610, 0.355, 1) infinite;
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
+@keyframes pulse {
+  0% { transform: scale(0.9); opacity: 0; }
+  50% { opacity: 0.3; }
+  100% { transform: scale(1.1); opacity: 0; }
+}
+
+.loading-card h2 {
+  font-family: var(--font-display);
+  font-size: 1.5rem;
+  margin-bottom: 0.75rem;
+}
+
+.loading-card p {
+  color: var(--text-muted);
+  font-size: 0.95rem;
+  line-height: 1.5;
+  margin-bottom: 2rem;
+}
+
+.progress-bar {
+  background: rgba(255, 255, 255, 0.05);
+  height: 6px;
+  border-radius: 99px;
+  overflow: hidden;
+}
+
+.progress-fill {
+  height: 100%;
+  width: 15%;
+  background: linear-gradient(90deg, var(--color-primary) 0%, var(--color-secondary) 100%);
+  border-radius: 99px;
+  animation: simulateProgress 8s ease-out forwards;
+}
+
+@keyframes simulateProgress {
+  0% { width: 5%; }
+  20% { width: 35%; }
+  50% { width: 60%; }
+  80% { width: 85%; }
+  100% { width: 95%; }
+}
+
+/* Workspace layout (Loaded state) */
+.workspace-view {
+  display: grid;
+  grid-template-columns: 320px 1fr;
+  gap: 2rem;
+  padding: 1.5rem 0;
+  height: calc(100vh - 120px);
+  align-items: stretch;
+}
+
+/* Sidebar */
+.sidebar {
+  display: flex;
+  flex-direction: column;
+  gap: 1.5rem;
+  height: 100%;
+}
+
+.video-info-card {
+  background: var(--bg-card);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  border: 1px solid var(--border-light);
+  border-radius: 20px;
+  padding: 1.5rem;
+  box-shadow: var(--shadow-md);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+}
+
+.thumbnail-container {
+  position: relative;
+  width: 100%;
+  aspect-ratio: 16/9;
+  border-radius: 12px;
+  overflow: hidden;
+  margin-bottom: 1.25rem;
+  box-shadow: var(--shadow-md);
+}
+
+.thumbnail-container img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.thumbnail-overlay {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  background: rgba(0, 0, 0, 0.4);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  opacity: 0;
+  transition: var(--transition-fast);
+}
+
+.thumbnail-container:hover .thumbnail-overlay {
+  opacity: 1;
+}
+
+.thumbnail-overlay svg {
+  width: 2.5rem;
+  height: 2.5rem;
+  color: #fff;
+}
+
+.video-title {
+  font-family: var(--font-display);
+  font-size: 1.15rem;
+  font-weight: 700;
+  line-height: 1.35;
+  margin-bottom: 0.5rem;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.video-author {
+  color: var(--text-muted);
+  font-size: 0.85rem;
+  margin-bottom: 1.5rem;
+}
+
+.change-video-btn {
+  background: rgba(255, 255, 255, 0.05);
+  color: var(--text-main);
+  border: 1px solid var(--border-light);
+  border-radius: 10px;
+  padding: 0.75rem 1.25rem;
+  font-weight: 600;
+  font-size: 0.9rem;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  transition: var(--transition-fast);
+  width: 100%;
+  justify-content: center;
+}
+
+.change-video-btn:hover {
+  background: rgba(255, 255, 255, 0.1);
+  border-color: rgba(255, 255, 255, 0.2);
+}
+
+.sidebar-footer {
+  margin-top: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 1.25rem;
+}
+
+.sidebar-partner-section {
+  width: 100%;
+}
+
+.sidebar-partner-section .hero-partner-btn {
+  width: 100%;
+  padding: 0.75rem 1rem;
+}
+
+.dev-info {
+  background: rgba(255, 255, 255, 0.02);
+  border: 1px solid var(--border-light);
+  border-radius: 12px;
+  padding: 1rem;
+}
+
+.dev-label {
+  color: var(--text-dark);
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  font-weight: 700;
+  letter-spacing: 0.5px;
+  margin-bottom: 0.25rem;
+}
+
+.dev-name {
+  font-family: var(--font-display);
+  font-weight: 700;
+  font-size: 0.95rem;
+  color: var(--text-main);
+}
+
+.dev-email {
+  font-size: 0.85rem;
+  color: var(--text-muted);
+}
+
+/* Chat Panel */
+.chat-panel {
+  background: var(--bg-card);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  border: 1px solid var(--border-light);
+  border-radius: 20px;
+  box-shadow: var(--shadow-md);
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  overflow: hidden;
+}
+
+.chat-history {
+  flex: 1;
+  overflow-y: auto;
+  padding: 1.5rem;
+  display: flex;
+  flex-direction: column;
+  gap: 1.25rem;
+}
+
+/* Custom Scrollbar for Chat */
+.chat-history::-webkit-scrollbar {
+  width: 6px;
+}
+
+.chat-history::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.chat-history::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.1);
+  border-radius: 99px;
+}
+
+.chat-history::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.2);
+}
+
+/* Message Bubbles */
+.message {
+  display: flex;
+  flex-direction: column;
+  max-width: 85%;
+  animation: messageFadeIn 0.3s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+}
+
+@keyframes messageFadeIn {
+  from { opacity: 0; transform: translateY(10px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.message.user {
+  align-self: flex-end;
+}
+
+.message.assistant {
+  align-self: flex-start;
+}
+
+.message-meta {
+  font-size: 0.75rem;
+  color: var(--text-dark);
+  font-weight: 600;
+  margin-bottom: 0.25rem;
+  margin-left: 0.5rem;
+}
+
+.message.user .message-meta {
+  margin-left: 0;
+  margin-right: 0.5rem;
+  text-align: right;
+}
+
+.message-bubble {
+  padding: 1rem 1.25rem;
+  border-radius: 16px;
+  font-size: 0.95rem;
+  line-height: 1.5;
+  word-break: break-word;
+}
+
+.message.user .message-bubble {
+  background: linear-gradient(135deg, var(--color-primary) 0%, var(--color-primary-hover) 100%);
+  color: #fff;
+  border-bottom-right-radius: 4px;
+  box-shadow: 0 4px 10px rgba(99, 102, 241, 0.2);
+}
+
+.message.assistant .message-bubble {
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--text-main);
+  border: 1px solid var(--border-light);
+  border-bottom-left-radius: 4px;
+}
+
+/* Markdown response rendering */
+.message-bubble p {
+  margin-bottom: 0.5rem;
+}
+
+.message-bubble p:last-child {
+  margin-bottom: 0;
+}
+
+.message-bubble ul, .message-bubble ol {
+  margin-left: 1.25rem;
+  margin-bottom: 0.5rem;
+}
+
+/* Chat Input Bar */
+.chat-input-area {
+  padding: 1.25rem 1.5rem;
+  border-top: 1px solid var(--border-light);
+  background: rgba(10, 11, 16, 0.3);
+}
+
+.chat-form {
+  display: flex;
+  background: rgba(8, 9, 13, 0.7);
+  border: 1px solid var(--border-light);
+  border-radius: 12px;
+  padding: 0.5rem;
+  align-items: center;
+  transition: var(--transition-normal);
+}
+
+.chat-form:focus-within {
+  border-color: var(--border-focus);
+  box-shadow: var(--shadow-glow);
+}
+
+.chat-form textarea {
+  flex: 1;
+  background: transparent;
+  border: none;
+  color: var(--text-main);
+  font-family: var(--font-sans);
+  font-size: 0.95rem;
+  outline: none;
+  padding: 0.5rem;
+  resize: none;
+  max-height: 120px;
+  min-height: 24px;
+  line-height: 1.4;
+}
+
+.chat-form textarea::placeholder {
+  color: var(--text-dark);
+}
+
+.send-btn {
+  background: var(--color-primary);
+  color: #fff;
+  border: none;
+  border-radius: 8px;
+  width: 2.25rem;
+  height: 2.25rem;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: var(--transition-fast);
+  flex-shrink: 0;
+}
+
+.send-btn:hover {
+  background: var(--color-primary-hover);
+  transform: scale(1.05);
+}
+
+.send-btn:active {
+  transform: scale(0.95);
+}
+
+.send-btn svg {
+  width: 1.1rem;
+  height: 1.1rem;
+}
+
+/* AI Typing Loading Indicator */
+.typing-indicator {
+  display: flex;
+  gap: 4px;
+  align-items: center;
+  padding: 0.5rem 0.25rem;
+}
+
+.typing-dot {
+  width: 6px;
+  height: 6px;
+  background-color: var(--text-muted);
+  border-radius: 50%;
+  animation: typingBounce 1.4s infinite ease-in-out both;
+}
+
+.typing-dot:nth-child(1) { animation-delay: -0.32s; }
+.typing-dot:nth-child(2) { animation-delay: -0.16s; }
+
+@keyframes typingBounce {
+  0%, 80%, 100% { transform: scale(0); }
+  40% { transform: scale(1); }
+}
+
+/* Footer credit styling */
+.app-footer {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 2rem 0;
+  border-top: 1px solid var(--border-light);
+  margin-top: auto;
+  font-size: 0.85rem;
+  color: var(--text-dark);
+}
+
+.footer-credit {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.credit-badge {
+  background: rgba(99, 102, 241, 0.1);
+  color: var(--color-primary);
+  border: 1px solid rgba(99, 102, 241, 0.2);
+  padding: 0.15rem 0.4rem;
+  border-radius: 4px;
+  font-weight: 700;
+  font-size: 0.75rem;
+  text-transform: uppercase;
+}
+
+.credit-details a {
+  color: var(--text-muted);
+  text-decoration: none;
+  transition: var(--transition-fast);
+}
+
+.credit-details a:hover {
+  color: var(--color-primary);
+  text-decoration: underline;
+}
+
+/* Responsive Breakpoints */
+@media (max-width: 992px) {
+  .workspace-view {
+    grid-template-columns: 1fr;
+    height: auto;
+    max-height: none;
+  }
+  
+  .sidebar {
+    height: auto;
+  }
+  
+  .chat-panel {
+    height: 500px;
+  }
+}
+
+@media (max-width: 768px) {
+  .app-container {
+    padding: 0 1rem;
+  }
+  
+  .hero-card {
+    padding: 2.5rem 1.5rem;
+  }
+  
+  .hero-title {
+    font-size: 2.25rem;
+  }
+  
+  .features-grid {
+    grid-template-columns: 1fr;
+    gap: 1rem;
+  }
+  
+  .app-footer {
+    flex-direction: column;
+    gap: 1rem;
+    text-align: center;
+    padding: 1.5rem 0;
+  }
+}
+</file>
+
+<file path="frontend/index.html">
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>OmniTube AI - Chat with YouTube Videos</title>
+  <!-- SEO Tags -->
+  <meta name="description" content="Load any YouTube video transcript and chat with an AI assistant to get summaries, answers, and deep insights instantly.">
+  
+  <!-- Modern Fonts -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Outfit:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+  
+  <!-- CSS Stylesheet -->
+  <link rel="stylesheet" href="index.css">
+</head>
+<body>
+  <!-- Ambient background glow elements -->
+  <div class="bg-glow blob-1"></div>
+  <div class="bg-glow blob-2"></div>
+
+  <div class="app-container">
+    <!-- Header -->
+    <header class="app-header">
+      <div class="brand">
+        <svg class="brand-icon" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+          <path d="M22.54 6.42a2.78 2.78 0 0 0-1.94-2C18.88 3.88 12 3.88 12 3.88s-6.88 0-8.6.46a2.78 2.78 0 0 0-1.94 2A29 29 0 0 0 1 11.75a29 29 0 0 0 .46 5.33A2.78 2.78 0 0 0 3.4 19c1.72.46 8.6.46 8.6.46s6.88 0 8.6-.46a2.78 2.78 0 0 0 1.94-2 29 29 0 0 0 .46-5.25 29 29 0 0 0-.46-5.33z" fill="#FF0000"/>
+          <polygon points="9.75 15.02 15.5 11.75 9.75 8.48 9.75 15.02" fill="#FFFFFF"/>
+        </svg>
+        <span class="brand-text">OmniTube <span class="accent-text">AI</span></span>
+      </div>
+      
+      <!-- Built for Digital Heroes Link (Mandatory Requirement) -->
+      <a href="https://digitalheroesco.com" target="_blank" rel="noopener noreferrer" class="hero-partner-btn" id="partnerBtn">
+        Built for Digital Heroes
+      </a>
+    </header>
+
+    <!-- MAIN VIEW 1: Video Loading Hero Screen -->
+    <main class="main-content" id="setupView">
+      <div class="hero-card">
+        <h1 class="hero-title">Chat with any <span class="gradient-text">YouTube Video</span></h1>
+        <p class="hero-subtitle">Enter a YouTube URL below to fetch the transcript, index it using vector embeddings, and start chatting with the content.</p>
+
+        <form class="url-form" id="urlForm">
+          <div class="input-wrapper">
+            <svg class="input-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"></path>
+              <path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"></path>
+            </svg>
+            <input type="text" id="youtubeUrl" placeholder="Paste YouTube link (e.g. https://www.youtube.com/watch?v=...)" required autocomplete="off">
+            <button type="submit" class="submit-btn" id="loadBtn">
+              <span>Load Video</span>
+              <svg class="arrow-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <line x1="5" y1="12" x2="19" y2="12"></line>
+                <polyline points="12 5 19 12 12 19"></polyline>
+              </svg>
+            </button>
+          </div>
+          <div class="error-msg" id="validationError"></div>
+        </form>
+
+        <div class="features-grid">
+          <div class="feature-item">
+            <div class="feature-icon-box">💡</div>
+            <h3>Smart Summaries</h3>
+            <p>Get instant summaries and core takeaways from any video transcript in seconds.</p>
+          </div>
+          <div class="feature-item">
+            <div class="feature-icon-box">🧠</div>
+            <h3>Vector-Search (RAG)</h3>
+            <p>Queries map semantic concepts directly to sections of the transcript for precise context.</p>
+          </div>
+          <div class="feature-item">
+            <div class="feature-icon-box">💬</div>
+            <h3>Interactive Q&A</h3>
+            <p>Ask clarifying questions, translate concepts, and quiz yourself on video materials.</p>
+          </div>
+        </div>
+      </div>
+    </main>
+
+    <!-- LOADING VIEW: Video Indexing Screen -->
+    <div class="loading-view hidden" id="loadingView">
+      <div class="loading-card">
+        <div class="spinner-container">
+          <div class="pulse-ring"></div>
+          <div class="spinner"></div>
+        </div>
+        <h2 id="loadingTitle">Fetching Transcript...</h2>
+        <p id="loadingStatus">Connecting to YouTube APIs and downloading transcription tracks...</p>
+        <div class="progress-bar">
+          <div class="progress-fill" id="progressFill"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- MAIN VIEW 2: Chat Workspace (Split View) -->
+    <main class="main-content workspace-view hidden" id="workspaceView">
+      <!-- Left Panel: Video Info & Actions -->
+      <aside class="sidebar">
+        <div class="video-info-card">
+          <div class="thumbnail-container">
+            <img id="videoThumbnail" src="" alt="YouTube Video Thumbnail">
+            <div class="thumbnail-overlay">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <polygon points="23 7 16 12 23 17 23 7"></polygon>
+                <rect x="1" y="5" width="15" height="14" rx="2" ry="2"></rect>
+              </svg>
+            </div>
+          </div>
+          <h2 class="video-title" id="videoTitle">Loading Title...</h2>
+          <p class="video-author" id="videoAuthor">YouTube Channel</p>
+          
+          <button class="change-video-btn" id="changeVideoBtn">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16">
+              <path d="M19 12H5M12 19l-7-7 7-7"/>
+            </svg>
+            Change Video
+          </button>
+        </div>
+
+        <!-- Sidebar Footer -->
+        <div class="sidebar-footer">
+          <div class="sidebar-partner-section">
+            <a href="https://digitalheroesco.com" target="_blank" rel="noopener noreferrer" class="hero-partner-btn w-100" id="sidebarPartnerBtn">
+              Built for Digital Heroes
+            </a>
+          </div>
+          <!-- Developer Credit (Mandatory Requirement) -->
+          <div class="dev-info">
+            <p class="dev-label">Developer Contact</p>
+            <p class="dev-name">Daksh</p>
+            <p class="dev-email">dakshapjn@gmail.com</p>
+          </div>
+        </div>
+      </aside>
+
+      <!-- Right Panel: AI Chat Window -->
+      <section class="chat-panel">
+        <div class="chat-history" id="chatHistory">
+          <!-- Messages will be injected here dynamically -->
+        </div>
+
+        <div class="chat-input-area">
+          <form class="chat-form" id="chatForm">
+            <textarea id="questionInput" placeholder="Ask a question about the transcript..." rows="1" required></textarea>
+            <button type="submit" class="send-btn" id="sendBtn" title="Ask AI">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+                <line x1="22" y1="2" x2="11" y2="13"></line>
+                <polygon points="22 2 15 22 11 13 2 9 22 2"></polygon>
+              </svg>
+            </button>
+          </form>
+        </div>
+      </section>
+    </main>
+
+    <!-- Footer for Landing View (Mandatory Requirement) -->
+    <footer class="app-footer" id="mainFooter">
+      <div class="footer-credit">
+        <span class="credit-badge">Developer</span>
+        <span class="credit-details">Daksh — <a href="mailto:dakshapjn@gmail.com">dakshapjn@gmail.com</a></span>
+      </div>
+      <div class="footer-copyright">
+        © 2026 OmniTube AI. All rights reserved.
+      </div>
+    </footer>
+  </div>
+
+  <!-- JavaScript file -->
+  <script src="app.js"></script>
+</body>
+</html>
+</file>
+
+<file path="frontend/manifest.json">
+{
+  "manifest_version": 3,
+  "name": "YouTube Video AI",
+  "version": "1.0.0",
+  "description": "Ask questions about YouTube video transcript using AI.",
+  "permissions": [
+    "activeTab"
+  ],
+  "action": {
+    "default_popup": "popup.html"
+  }
+}
+</file>
+
+<file path="frontend/popup.html">
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <style>
+    body {
+      width: 320px;
+      font-family: Arial, sans-serif;
+      padding: 15px;
+      margin: 0;
+    }
+    h3 { margin-top: 0; font-size: 14px; color: #333; }
+    input {
+      width: 100%;
+      padding: 8px;
+      box-sizing: border-box;
+      margin-bottom: 10px;
+      border: 1px solid #ccc;
+      border-radius: 4px;
+    }
+    button {
+      width: 100%;
+      padding: 8px;
+      background-color: #cc0000;
+      color: white;
+      border: none;
+      border-radius: 4px;
+      cursor: pointer;
+      font-weight: bold;
+    }
+    button:disabled { background-color: #aaa; }
+    #result {
+      margin-top: 12px;
+      font-size: 13px;
+      line-height: 1.4;
+      max-height: 200px;
+      overflow-y: auto;
+      white-space: pre-wrap;
+    }
+  </style>
+</head>
+<body>
+  <h3>Ask YouTube Video AI</h3>
+  <input type="text" id="questionInput" placeholder="e.g., What are the learning objectives?" disabled />
+  <button id="askBtn" disabled>Ask AI</button>
+  <div id="result">Detecting YouTube video...</div>
+
+  <script src="popup.js"></script>
+</body>
+</html>
+</file>
+
+<file path="frontend/popup.js">
+let currentVideoId = null;
+
+function getYouTubeId(url) {
+  try {
+    const urlObj = new URL(url);
+    if (urlObj.hostname.includes("youtube.com")) {
+      return urlObj.searchParams.get("v");
+    } else if (urlObj.hostname.includes("youtu.be")) {
+      return urlObj.pathname.substring(1);
+    }
+  } catch (e) { return null; }
+  return null;
+}
+
+// 1. Initial configuration check on popup open
+chrome.tabs.query({ active: true, currentWindow: true }, function (tabs) {
+  const currentTab = tabs[0];
+  const resultDiv = document.getElementById("result");
+  const questionInput = document.getElementById("questionInput");
+  const askBtn = document.getElementById("askBtn");
+
+  if (currentTab && currentTab.url) {
+    currentVideoId = getYouTubeId(currentTab.url);
+    
+    if (currentVideoId) {
+      resultDiv.innerText = "Video detected! Type your question above.";
+      questionInput.disabled = false;
+      askBtn.disabled = false;
+    } else {
+      resultDiv.innerText = "Please navigate to a valid YouTube video page.";
+    }
+  } else {
+    resultDiv.innerText = "Unable to read current tab.";
+  }
+});
+
+// 2. Handle button click to fetch data from Flask backend
+document.getElementById("askBtn").addEventListener("click", async () => {
+  const question = document.getElementById("questionInput").value.trim();
+  const resultDiv = document.getElementById("result");
+  
+  if (!question) return;
+
+  resultDiv.innerText = "Analyzing transcript & generating answer...";
+  
+  try {
+    const response = await fetch("http://127.0.0.1:5000/ask", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({
+        video_id: currentVideoId,
+        question: question
+      })
+    });
+
+    const data = await response.json();
+    
+    if (response.ok) {
+      resultDiv.innerText = data.answer;
+    } else {
+      resultDiv.innerText = `Error: ${data.error || "Something went wrong"}`;
+    }
+  } catch (error) {
+    resultDiv.innerText = "Could not connect to Python backend. Ensure app.py is running.";
+    console.error(error);
+  }
+});
+</file>
+
+<file path="SUBMISSION.md">
+# Trial Task Submission - Custom Software Developer
+
+Dear Digital Heroes Team,
+
+Here is my complete submission for the Custom Software Developer trial task:
+
+1. **Live Tool URL (Vercel)**: https://omnitube-ai.vercel.app
+2. **GitHub Repo Link (Public)**: https://github.com/Lethal-Tempest/omnitube.git
+3. **Full Name & Contact**: Daksh Arora (dakshapjn@gmail.com)
+4. **Use Case Explanation**: OmniTube AI is an interactive Q&A tool that embeds YouTube transcripts using RAG to answer video queries instantly; I personally use it to quickly extract key takeaways and action points from long coding tutorials and technical video documentation without watching hours of footage.
+
+Thank you, and I look forward to your feedback!
+
+Best regards,
+Daksh
+</file>
+
+</files>
